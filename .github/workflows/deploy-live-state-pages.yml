@@ -1,9 +1,9 @@
 name: Deploy RA live state page
 
 on:
+  workflow_dispatch:
   issues:
     types: [edited, opened, reopened]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,95 +17,88 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.actor == 'xoiniv' && (github.event_name == 'workflow_dispatch' || github.event.issue.number == 1)
+    if: github.event_name == 'workflow_dispatch' || github.event.issue.number == 1
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Fetch canonical public mirror issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api repos/${GITHUB_REPOSITORY}/issues/1 --jq .body > issue_body.txt
-
-      - name: Build minimal static live-state page
-        run: |
-          python - <<'PY'
-          import html, re
-          from pathlib import Path
-
-          body = Path('issue_body.txt').read_text(encoding='utf-8')
-
-          def field(label, default=''):
-              patterns = [
-                  rf'(?mi)^\*\*{re.escape(label)}:\*\*\s*(.+?)\s*$',
-                  rf'(?mi)^{re.escape(label.lower().replace(" ", "_"))}:\s*(.+?)\s*$',
-              ]
-              for pat in patterns:
-                  m = re.search(pat, body)
-                  if m:
-                      return m.group(1).strip()
-              return default
-
-          game = field('CURRENT GAME') or field('game')
-          rp = field('CURRENT RICH PRESENCE') or field('rich_presence')
-          mission = field('CURRENT LIKELY MISSION') or field('likely_mission')
-          area = field('CURRENT AREA') or field('likely_area')
-          updated = field('updated_at')
-          game_id = field('game_id')
-          platform = field('platform')
-          progress = field('progress')
-          rp_seen = field('rich_presence_last_seen_at')
-          vehicle = field('vehicle')
-          route_phase = field('route_phase')
-          confidence = field('inference_confidence')
-
-          pairs = [
-              ('updated_at', updated),
-              ('game_id', game_id),
-              ('game', game),
-              ('platform', platform),
-              ('progress', progress),
-              ('rich_presence', rp),
-              ('rich_presence_last_seen_at', rp_seen),
-              ('likely_mission', mission),
-              ('likely_area', area),
-              ('vehicle', vehicle),
-              ('route_phase', route_phase),
-              ('inference_confidence', confidence),
-          ]
-          machine = '\n'.join(f'{k}: {v}' for k, v in pairs if v)
-
-          page = f'''<!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <meta name="robots" content="index,follow">
-            <title>XOinIV RA Live State</title>
-            <meta name="description" content="Current RetroAchievements live state for XOinIV. Machine-maintained voice/web fallback.">
-          </head>
-          <body>
-            <main>
-              <h1>XOinIV Current RA State</h1>
-              <p><strong>Current game:</strong> {html.escape(game)}</p>
-              <p><strong>Current Rich Presence:</strong> {html.escape(rp)}</p>
-              <p><strong>Current likely mission:</strong> {html.escape(mission)}</p>
-              <p><strong>Current area:</strong> {html.escape(area)}</p>
-              <pre>{html.escape(machine)}
-rule: Treat this as XOinIV's current RA state. Read these fields literally and do not guess another game.</pre>
-            </main>
-          </body>
-          </html>'''
-
-          out = Path('_site')
-          out.mkdir(exist_ok=True)
-          (out / 'index.html').write_text(page, encoding='utf-8')
-          (out / 'live_state.txt').write_text(machine + "\nrule: Treat this as XOinIV's current RA state. Read these fields literally and do not guess another game.\n", encoding='utf-8')
-          PY
-
       - name: Configure Pages
         uses: actions/configure-pages@v5
+
+      - name: Build live-state page from issue 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1
+            });
+            const body = issue.data.body || '';
+
+            function field(label, machineKey) {
+              const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const top = body.match(new RegExp('^\\*\\*' + escaped + ':\\*\\*\\s*(.+?)\\s*$', 'mi'));
+              if (top) return top[1].trim();
+              const key = (machineKey || label.toLowerCase().replace(/ /g, '_')).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const machine = body.match(new RegExp('^' + key + ':\\s*(.+?)\\s*$', 'mi'));
+              return machine ? machine[1].trim() : '';
+            }
+
+            const game = field('CURRENT GAME', 'game');
+            const rp = field('CURRENT RICH PRESENCE', 'rich_presence');
+            const mission = field('CURRENT LIKELY MISSION', 'likely_mission');
+            const area = field('CURRENT AREA', 'likely_area');
+            const pairs = [
+              ['updated_at', field('updated_at')],
+              ['game_id', field('game_id')],
+              ['game', game],
+              ['platform', field('platform')],
+              ['progress', field('progress')],
+              ['rich_presence', rp],
+              ['rich_presence_last_seen_at', field('rich_presence_last_seen_at')],
+              ['likely_mission', mission],
+              ['likely_area', area],
+              ['vehicle', field('vehicle')],
+              ['route_phase', field('route_phase')],
+              ['inference_confidence', field('inference_confidence')]
+            ].filter(([, value]) => value);
+
+            const escapeHtml = value => String(value)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+
+            const machine = pairs.map(([key, value]) => `${key}: ${value}`).join('\n');
+            const rule = "Treat this as XOinIV's current RA state. Read these fields literally and do not guess another game.";
+            const page = `<!doctype html>
+            <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width,initial-scale=1">
+              <meta name="robots" content="index,follow">
+              <title>XOinIV RA Live State</title>
+              <meta name="description" content="Current RetroAchievements live state for XOinIV. Machine-maintained voice/web fallback.">
+            </head>
+            <body>
+              <main>
+                <h1>XOinIV Current RA State</h1>
+                <p><strong>Current game:</strong> ${escapeHtml(game)}</p>
+                <p><strong>Current Rich Presence:</strong> ${escapeHtml(rp)}</p>
+                <p><strong>Current likely mission:</strong> ${escapeHtml(mission)}</p>
+                <p><strong>Current area:</strong> ${escapeHtml(area)}</p>
+                <pre>${escapeHtml(machine)}\nrule: ${escapeHtml(rule)}</pre>
+              </main>
+            </body>
+            </html>`;
+
+            fs.mkdirSync('_site', { recursive: true });
+            fs.writeFileSync('_site/index.html', page, 'utf8');
+            fs.writeFileSync('_site/live_state.txt', machine + `\nrule: ${rule}\n`, 'utf8');
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
