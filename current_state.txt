@@ -1,0 +1,15 @@
+RA COMPANION LIVE STATE — PUBLIC VOICE/WEB FALLBACK
+updated_at: 2026-08-17T12:50:03.590397+00:00
+app_version: 4.14.0
+game_id: 2772
+game: Grand Theft Auto: San Andreas
+platform: PlayStation 2
+progress: 13/261
+rich_presence: CJ is carrying the Tec-9 while driving the Forklift in Ocean Docks
+rich_presence_last_seen_at: 2026-08-17T12:50:01.215929+00:00
+likely_mission: Robbing Uncle Sam
+likely_area: Ocean Docks
+vehicle: Forklift
+route_phase: Early Los Santos
+inference_confidence: 0.97
+rule: Treat this as XOinIV's current RA state. Do not guess a different game from memory or unrelated search results.
