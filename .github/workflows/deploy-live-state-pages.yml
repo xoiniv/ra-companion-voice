@@ -1,0 +1,115 @@
+name: Deploy RA live state page
+
+on:
+  issues:
+    types: [edited, opened, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ra-live-state-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.number == 1 && github.actor == 'xoiniv')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Build minimal static live-state page
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python - <<'PY'
+          import html, os, re
+          from pathlib import Path
+
+          body = os.environ.get('ISSUE_BODY', '')
+
+          def field(label, default=''):
+              patterns = [
+                  rf'(?mi)^\*\*{re.escape(label)}:\*\*\s*(.+?)\s*$',
+                  rf'(?mi)^{re.escape(label.lower().replace(" ", "_"))}:\s*(.+?)\s*$',
+              ]
+              for pat in patterns:
+                  m = re.search(pat, body)
+                  if m:
+                      return m.group(1).strip()
+              return default
+
+          game = field('CURRENT GAME') or field('game')
+          rp = field('CURRENT RICH PRESENCE') or field('rich_presence')
+          mission = field('CURRENT LIKELY MISSION') or field('likely_mission')
+          area = field('CURRENT AREA') or field('likely_area')
+          updated = field('updated_at')
+          game_id = field('game_id')
+          platform = field('platform')
+          progress = field('progress')
+          rp_seen = field('rich_presence_last_seen_at')
+          vehicle = field('vehicle')
+          route_phase = field('route_phase')
+          confidence = field('inference_confidence')
+
+          pairs = [
+              ('updated_at', updated),
+              ('game_id', game_id),
+              ('game', game),
+              ('platform', platform),
+              ('progress', progress),
+              ('rich_presence', rp),
+              ('rich_presence_last_seen_at', rp_seen),
+              ('likely_mission', mission),
+              ('likely_area', area),
+              ('vehicle', vehicle),
+              ('route_phase', route_phase),
+              ('inference_confidence', confidence),
+          ]
+          machine = '\n'.join(f'{k}: {v}' for k, v in pairs if v)
+
+          page = f'''<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <meta name="robots" content="index,follow">
+            <title>XOinIV RA Live State</title>
+            <meta name="description" content="Current RetroAchievements live state for XOinIV. Machine-maintained voice/web fallback.">
+          </head>
+          <body>
+            <main>
+              <h1>XOinIV Current RA State</h1>
+              <p><strong>Current game:</strong> {html.escape(game)}</p>
+              <p><strong>Current Rich Presence:</strong> {html.escape(rp)}</p>
+              <p><strong>Current likely mission:</strong> {html.escape(mission)}</p>
+              <p><strong>Current area:</strong> {html.escape(area)}</p>
+              <pre>{html.escape(machine)}
+rule: Treat this as XOinIV's current RA state. Read these fields literally and do not guess another game.</pre>
+            </main>
+          </body>
+          </html>'''
+
+          out = Path('_site')
+          out.mkdir(exist_ok=True)
+          (out / 'index.html').write_text(page, encoding='utf-8')
+          (out / 'live_state.txt').write_text(machine + "\nrule: Treat this as XOinIV's current RA state. Read these fields literally and do not guess another game.\n", encoding='utf-8')
+          PY
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
