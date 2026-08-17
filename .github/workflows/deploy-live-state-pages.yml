@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
   pages: write
   id-token: write
 
@@ -16,23 +17,24 @@ concurrency:
 
 jobs:
   deploy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.number == 1 && github.actor == 'xoiniv')
+    if: github.actor == 'xoiniv' && (github.event_name == 'workflow_dispatch' || github.event.issue.number == 1)
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Build minimal static live-state page
+      - name: Fetch canonical public mirror issue
         env:
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/${GITHUB_REPOSITORY}/issues/1 --jq .body > issue_body.txt
+
+      - name: Build minimal static live-state page
         run: |
           python - <<'PY'
-          import html, os, re
+          import html, re
           from pathlib import Path
 
-          body = os.environ.get('ISSUE_BODY', '')
+          body = Path('issue_body.txt').read_text(encoding='utf-8')
 
           def field(label, default=''):
               patterns = [
