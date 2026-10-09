@@ -1,0 +1,190 @@
+name: Temporary LiMusic bare numpad build
+
+on:
+  push:
+    branches:
+      - temp-limusic-numpad-build
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      MPV_DEV_URL: https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260610/mpv-dev-x86_64-20260610-git-304426c.7z
+      MPV_DIR: ${{ github.workspace }}\.libmpv
+      RUSTFLAGS: -L native=${{ github.workspace }}\.libmpv
+
+    steps:
+      - name: Checkout exact LiMusic v1.2.0 source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: SimoHypers/limusic
+          ref: v1.2.0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: cd ui && pnpm install --frozen-lockfile
+
+      - name: Select Rust MSVC toolchain
+        shell: bash
+        run: rustup default stable-msvc
+
+      - name: Install pinned Tauri CLI
+        shell: bash
+        run: npm install -g "@tauri-apps/cli@2.11.5"
+
+      - name: Build libmpv import library
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "$env:MPV_DIR" | Out-Null
+          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$env:MPV_DEV_URL"
+          7z x "$env:MPV_DIR\mpv-dev.7z" -o"$env:MPV_DIR" -y | Out-Null
+          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw "libmpv-2.dll missing" }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          Set-Location "$env:MPV_DIR"
+          $names = & dumpbin /exports libmpv-2.dll |
+            Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\w+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -lt 50) { throw "parsed only $($names.Count) libmpv exports" }
+          @("EXPORTS") + ($names | ForEach-Object { "    $_" }) | Set-Content mpv.def -Encoding ascii
+          & lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /machine:x64
+          if (-not (Test-Path "$env:MPV_DIR\mpv.lib")) { throw "mpv.lib missing" }
+          Copy-Item "$env:MPV_DIR\libmpv-2.dll" "$env:GITHUB_WORKSPACE\src-tauri\libmpv-2.dll" -Force
+          $env:MPV_DIR | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Match official release cipher bootstrap
+        shell: bash
+        run: |
+          FARADAY=https://raw.githubusercontent.com/MetrolistGroup/faraday/master/registry/player_configs.json
+          ZEMER=https://raw.githubusercontent.com/ZemerTeam/zemer-cipher/master/library/src/main/assets/player_configs.json
+          tmp="$(mktemp)"
+          for url in "$FARADAY" "$ZEMER"; do
+            if curl -fsSL --max-time 30 "$url" -o "$tmp" \
+               && jq -e '(.players | objects | length) > 0' "$tmp" >/dev/null 2>&1; then
+              cp "$tmp" src-tauri/cipher_configs.json
+              echo "bundled $(jq '.players | length' "$tmp") player configs from $url"
+              exit 0
+            fi
+            echo "::warning::player-cipher registry unusable: $url"
+          done
+          echo "::warning::no player-cipher registry reachable; runtime refresh will still be used"
+
+      - name: RED - add the bare-numpad expectation first
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("src-tauri/src/hotkeys.rs")
+          s = p.read_text(encoding="utf-8")
+          needle = '        assert!(parse_shortcut("Super+Numpad5").is_ok());\n'
+          addition = needle + (
+              '        assert!(parse_shortcut("Numpad0").is_ok());\n'
+              '        assert!(parse_shortcut("Numpad5").is_ok());\n'
+              '        assert!(parse_shortcut("Numpad9").is_ok());\n'
+          )
+          if needle not in s:
+              raise SystemExit("expected v1.2.0 test anchor not found")
+          p.write_text(s.replace(needle, addition, 1), encoding="utf-8")
+
+      - name: RED - prove v1.2.0 rejects bare numpad keys
+        shell: bash
+        run: |
+          set +e
+          cargo test -p limusic-app hotkeys::tests::test_parse_shortcut_valid -- --nocapture 2>&1 | tee red-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::RED test unexpectedly passed before the implementation"
+            exit 1
+          fi
+          if ! grep -q 'parse_shortcut("Numpad0").is_ok()' red-test.log; then
+            echo "::error::RED run failed for something other than the intended bare-numpad assertion"
+            exit 1
+          fi
+          echo "Expected RED failure confirmed."
+
+      - name: GREEN - allow only bare numpad digits
+        shell: python
+        run: |
+          from pathlib import Path
+
+          rust = Path("src-tauri/src/hotkeys.rs")
+          s = rust.read_text(encoding="utf-8")
+          s = s.replace(
+              '/// Parse a stored binding ("Ctrl+Alt+Space") with the plugin\'s own parser. A bare key is refused:\n'
+              '/// a global grab on Space or a letter would take that key from every app on the desktop. F-keys\n'
+              '/// are the exception, nothing types with them.\n',
+              '/// Parse a stored binding ("Ctrl+Alt+Space") with the plugin\'s own parser. Most bare keys are\n'
+              '/// refused: a global grab on Space or a letter would take that key from every app on the desktop.\n'
+              '/// F-keys and numpad digits are exceptions for dedicated shortcut use.\n',
+              1,
+          )
+          old = '''    #[rustfmt::skip]\n    let fkey = matches!(shortcut.key, F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12\n        | F13 | F14 | F15 | F16 | F17 | F18 | F19 | F20 | F21 | F22 | F23 | F24);\n    if !modified && !fkey {\n'''
+          new = '''    #[rustfmt::skip]\n    let fkey = matches!(shortcut.key, F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12\n        | F13 | F14 | F15 | F16 | F17 | F18 | F19 | F20 | F21 | F22 | F23 | F24);\n    #[rustfmt::skip]\n    let numpad_digit = matches!(shortcut.key, Numpad0 | Numpad1 | Numpad2 | Numpad3 | Numpad4\n        | Numpad5 | Numpad6 | Numpad7 | Numpad8 | Numpad9);\n    if !modified && !fkey && !numpad_digit {\n'''
+          if old not in s:
+              raise SystemExit("expected v1.2.0 backend validation block not found")
+          rust.write_text(s.replace(old, new, 1), encoding="utf-8")
+
+          front = Path("ui/src/lib/hotkeys.svelte.ts")
+          s = front.read_text(encoding="utf-8")
+          s = s.replace(
+              ' * Returns null for modifiers alone, an unsupported key, or a key with no Ctrl, Alt or Super.\n',
+              ' * Returns null for modifiers alone, an unsupported key, or a disallowed bare key.\n',
+              1,
+          )
+          old = '''\t// A bare key (or Shift+key) would be grabbed from every app on the desktop. F-keys type nothing.\n\tif (!e.ctrlKey && !e.altKey && !e.metaKey && !/^F\\d/.test(primaryKey)) {\n\t\treturn null;\n\t}\n'''
+          new = '''\t// Most bare keys would be grabbed from every app. F-keys and numpad digits are allowed.\n\tconst bareSafe = /^F\\d/.test(primaryKey) || /^Numpad[0-9]$/.test(primaryKey);\n\tif (!e.ctrlKey && !e.altKey && !e.metaKey && !bareSafe) {\n\t\treturn null;\n\t}\n'''
+          if old not in s:
+              raise SystemExit("expected v1.2.0 frontend validation block not found")
+          front.write_text(s.replace(old, new, 1), encoding="utf-8")
+
+      - name: Verify targeted test goes GREEN
+        shell: bash
+        run: cargo test -p limusic-app hotkeys::tests::test_parse_shortcut_valid -- --nocapture
+
+      - name: Verify full Rust suite
+        shell: bash
+        run: cargo test --all
+
+      - name: Verify frontend types and Svelte
+        shell: bash
+        run: cd ui && pnpm check
+
+      - name: Verify Rust formatting
+        shell: bash
+        run: cargo fmt --all -- --check
+
+      - name: Build frontend
+        shell: bash
+        run: cd ui && pnpm build
+
+      - name: Build personal NSIS installer
+        shell: bash
+        run: |
+          tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":""}}'
+
+      - name: Upload patched installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: limusic-v1.2.0-bare-numpad-windows
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
